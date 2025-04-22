@@ -122,7 +122,7 @@ def webhook():
 # === Установка webhook при старте ===
 @app.before_first_request
 def setup_webhook():
-    webhook_url = f"https://srv-d03mhhili9vc73fqppt0.onrender.com/{TOKEN}"
+    webhook_url = f"https://kapitalyuga-bot.onrender.com/{TOKEN}"
     bot.remove_webhook()
     bot.set_webhook(url=webhook_url)
 
