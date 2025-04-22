@@ -124,91 +124,92 @@ def handle_add(message):
         entry_date = now.strftime("%d.%m.%Y")
         entry_time = now.strftime("%H:%M:%S")
 
-        # Формируем строку для A-AC (29 столбцов)
-        new_row_data = [""] * EXPECTED_COLUMNS  # Создаем список из 29 пустых строк
-
+        # --- НАДЕЖНЫЙ СПОСОБ: Находим строку и обновляем только нужные ячейки ---
         try:
-            new_row_data[0] = entry_date  # A: Дата ВХОДА
-            new_row_data[1] = entry_time  # B: Время ВХОДА
-            # C, D (Выход) - остаются ""
-            new_row_data[4] = asset  # E: Торгуемая пара
-            new_row_data[5] = direction  # F: Тип сделки
-            new_row_data[6] = float(entry_price_str)  # G: Цена входа
-            new_row_data[7] = float(sl_str)  # H: Уровень Stop Loss
-            new_row_data[8] = float(tp_str)  # I: Уровень Take Profit
-            new_row_data[9] = float(amount_str)  # J: Объём сделки (в монетах)
-            # K-AC остаются "" (или будут рассчитаны формулами в таблице)
+            # Получаем все значения из первого столбца (A: Дата ВХОДА) для поиска последней строки
+            logger.debug("Fetching column A values to find next empty row...")
+            col_a_values = sheet.col_values(
+                1, value_render_option="UNFORMATTED_VALUE"
+            )  # col_values нумерует с 1
+            logger.debug(f"Found {len(col_a_values)} values in column A.")
 
-        except ValueError as e:
-            logger.error(
-                f"ValueError converting numbers in /add from {chat_id}: {e}",
-                exc_info=True,
+            # Ищем индекс последней непустой ячейки в столбце A
+            last_data_row_index = len(col_a_values) - 1
+            while (
+                last_data_row_index > 0
+                and str(col_a_values[last_data_row_index]).strip() == ""
+            ):
+                last_data_row_index -= 1
+
+            # Номер строки для обновления = индекс последней строки с данными + 1 (для 0-based->1-based) + 1 (для след. строки)
+            target_row_number = last_data_row_index + 2
+            logger.info(
+                f"Last data found in column A at index {last_data_row_index}. Target row for update is {target_row_number}."
+            )
+
+            # Готовим список обновлений для batch_update
+            updates = []
+            # Формат: {'range': 'A{row}', 'values': [[value]]}
+            try:
+                updates.append(
+                    {"range": f"A{target_row_number}", "values": [[entry_date]]}
+                )  # A: Дата ВХОДА
+                updates.append(
+                    {"range": f"B{target_row_number}", "values": [[entry_time]]}
+                )  # B: Время ВХОДА
+                updates.append(
+                    {"range": f"E{target_row_number}", "values": [[asset]]}
+                )  # E: Торгуемая пара
+                updates.append(
+                    {"range": f"F{target_row_number}", "values": [[direction]]}
+                )  # F: Тип сделки
+                updates.append(
+                    {
+                        "range": f"G{target_row_number}",
+                        "values": [[float(entry_price_str)]],
+                    }
+                )  # G: Цена входа
+                updates.append(
+                    {"range": f"H{target_row_number}", "values": [[float(sl_str)]]}
+                )  # H: Уровень Stop Loss
+                updates.append(
+                    {"range": f"I{target_row_number}", "values": [[float(tp_str)]]}
+                )  # I: Уровень Take Profit
+                updates.append(
+                    {"range": f"J{target_row_number}", "values": [[float(amount_str)]]}
+                )  # J: Объём сделки (в монетах)
+                # Остальные ячейки (K-AC) НЕ ТРОГАЕМ, чтобы не затереть формулы
+            except ValueError as e:
+                logger.error(
+                    f"ValueError converting numbers for batch_update: {e}",
+                    exc_info=True,
+                )
+                bot.reply_to(
+                    message,
+                    f"Ошибка в формате чисел: {e}. Проверьте цены, стоп, тейк и объем.",
+                )
+                return
+
+            logger.debug(f"Prepared batch update data: {updates}")
+
+            # Выполняем пакетное обновление только указанных ячеек
+            sheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+            logger.info(
+                f"Updated cells in row {target_row_number} for {asset} via batch_update."
             )
             bot.reply_to(
                 message,
-                f"Ошибка в формате чисел: {e}. Проверьте цены, стоп, тейк и объем.",
-            )
-            return
-        except IndexError:
-            logger.error(
-                f"IndexError preparing row. Expected {EXPECTED_COLUMNS} columns."
-            )
-            bot.reply_to(
-                message, "Внутренняя ошибка при подготовке данных для таблицы."
-            )
-            return
-
-        logger.debug(f"Prepared row data (len={len(new_row_data)}): {new_row_data}")
-
-        # --- ИЗМЕНЕНИЕ ЛОГИКИ: Вместо append_row ищем следующую пустую строку ---
-        try:
-            # Получаем все значения из первого столбца (A: Дата ВХОДА)
-            col_a_values = sheet.col_values(1)  # col_values нумерует с 1
-            # Ищем индекс последней непустой ячейки в столбце A
-            last_data_row_index = (
-                len(col_a_values) - 1
-            )  # Индекс последней строки с ЛЮБЫМ значением
-            while last_data_row_index > 0 and col_a_values[last_data_row_index] == "":
-                last_data_row_index -= 1
-
-            # Номер строки для вставки = индекс последней строки с данными + 1 (для 1-based нумерации) + 1 (для след. строки)
-            insert_row_number = last_data_row_index + 2
-            logger.info(
-                f"Found last data in column A at index {last_data_row_index}. Inserting new row at sheet row {insert_row_number}."
-            )
-
-            # Вставляем данные в найденную строку
-            # ВАЖНО: insert_row может сдвинуть формулы ниже, если они есть.
-            # Если формулы протянуты на много строк вперед, лучше использовать update диапазона.
-            # Попробуем сначала insert_row, он проще.
-            sheet.insert_row(
-                new_row_data, index=insert_row_number, value_input_option="USER_ENTERED"
-            )
-
-            # Альтернатива (если insert_row сдвигает формулы):
-            # target_range = f"A{insert_row_number}:{gspread.utils.rowcol_to_a1(insert_row_number, EXPECTED_COLUMNS)}"
-            # sheet.update(target_range, [new_row_data], value_input_option='USER_ENTERED')
-            # logger.info(f"Updated range {target_range} for new trade.")
-
-            logger.info(
-                f"Inserted row for {asset} to Google Sheet at row {insert_row_number} initiated by {chat_id}."
-            )
-            bot.reply_to(
-                message, f"Сделка по {asset} добавлена в строку {insert_row_number}!"
+                f"Сделка по {asset} добавлена/обновлена в строке {target_row_number}!",
             )
 
         except Exception as e:
             logger.error(
-                f"Error finding insert row or inserting data: {e}", exc_info=True
+                f"Error finding row or batch updating sheet: {e}", exc_info=True
             )
-            # Если вставка не удалась, пробуем старый append_row как запасной вариант? Или просто сообщаем об ошибке.
-            # bot.reply_to(message, "Ошибка при вставке строки, попробуйте добавить вручную или проверьте таблицу.")
-            # Пока оставим так, чтобы видеть ошибку.
-            # Можно раскомментировать append_row ниже как fallback:
-            # logger.warning("Inserting row failed, falling back to append_row")
-            # sheet.append_row(new_row_data, value_input_option="USER_ENTERED")
-            # bot.reply_to(message, f"Сделка по {asset} добавлена в конец таблицы (ошибка вставки).")
-            raise  # Передаем ошибку дальше, чтобы увидеть traceback в логах
+            bot.reply_to(
+                message, "Ошибка при поиске строки или обновлении ячеек в таблице."
+            )
 
     except Exception as e:
         logger.error(
