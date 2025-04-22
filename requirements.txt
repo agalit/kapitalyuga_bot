@@ -3,3 +3,4 @@ gspread>=5.12.0
 google-auth>=2.0.0
 Flask>=2.3.0
 gunicorn>=21.0.0
+pybit>=5.0.0
