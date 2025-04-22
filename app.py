@@ -119,14 +119,6 @@ def webhook():
     return "ok", 200
 
 
-# === Установка webhook при старте ===
-@app.before_first_request
-def setup_webhook():
-    webhook_url = f"https://kapitalyuga-bot.onrender.com/{TOKEN}"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-
-
 # === Запуск Flask-сервера ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
