@@ -123,8 +123,10 @@ def add_trade(message):
             float(entry_price_str),  # Цена входа (D)
             "",  # Факт. цена выхода (E) - оставляем пустой
             float(amount_str),  # Сумма ($) (F)
-            '=INDIRECT("R"&ROW()&"C5",FALSE)*INDIRECT("R"&ROW()&"C6",FALSE) - INDIRECT("R"&ROW()&"C4",FALSE)*INDIRECT("R"&ROW()&"C6",FALSE)',  # Результат ($) (G) - Используем INDIRECT для относительных ссылок при добавлении
-            '=(INDIRECT("R"&ROW()&"C5",FALSE) - INDIRECT("R"&ROW()&"C4",FALSE))/INDIRECT("R"&ROW()&"C4",FALSE)*100',  # Результат (%) (H) - Используем INDIRECT
+            # Формула для Результат ($) (G): ЕСЛИ(E5 пусто; ТО 0; ИНАЧЕ E5*F5 - D5*F5)
+            '=IF(ISBLANK(INDIRECT("R"&ROW()&"C5",FALSE)), 0, INDIRECT("R"&ROW()&"C5",FALSE)*INDIRECT("R"&ROW()&"C6",FALSE) - INDIRECT("R"&ROW()&"C4",FALSE)*INDIRECT("R"&ROW()&"C6",FALSE))',
+            # Формула для Результат (%) (H): ЕСЛИ(E5 пусто; ТО ""; ИНАЧЕ (E5-D5)/D5*100)
+            '=IF(ISBLANK(INDIRECT("R"&ROW()&"C5",FALSE)), "", (INDIRECT("R"&ROW()&"C5",FALSE) - INDIRECT("R"&ROW()&"C4",FALSE))/INDIRECT("R"&ROW()&"C4",FALSE)*100)',
             float(sl_str),  # Стоп лосс ($) (I)
             float(tp_str),  # Тейк профит ($) (J)
             # Добавьте столько "", сколько у вас еще столбцов до конца строки
@@ -135,7 +137,7 @@ def add_trade(message):
             "",
             "",
             "",
-            "",  # K L M N O P Q R - пример, уточните!
+            "",  # K L M N O P Q R - пример, уточни!
         ]
         logger.debug(f"Prepared row data: {new_row}")
 
