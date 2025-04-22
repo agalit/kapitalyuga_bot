@@ -20,9 +20,9 @@ scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
-credentials = ServiceAccountCredentials.from_json_keyfile_name(
-    "credentials.json", scope
-)
+CREDENTIALS_PATH = "/etc/secrets/credentials.json"
+credentials = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_PATH, scope)
+
 client = gspread.authorize(credentials)
 sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
