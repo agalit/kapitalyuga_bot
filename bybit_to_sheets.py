@@ -2,14 +2,29 @@ import os
 import logging
 import datetime
 import time
-import telebot  # Для уведомлений
+
+# Все стандартные библиотеки вместе
+
+# Все сторонние библиотеки вместе
+import telebot
 import gspread
-
-# Используем современную библиотеку google-auth
 from google.oauth2.service_account import Credentials
-
-# Используем библиотеку pybit для Bybit API v5
 from pybit.unified_trading import HTTP
+from dotenv import load_dotenv
+
+# --- УПРОЩЕННЫЕ ОТЛАДОЧНЫЕ ВЫВОДЫ ---
+print(f"Текущая рабочая папка: {os.getcwd()}")
+# Просто вызываем load_dotenv() без аргументов, он сам найдет .env
+load_success = load_dotenv()
+print(
+    f"load_dotenv() выполнился успешно: {load_success}"
+)  # Должно быть True, если .env найден и прочитан
+# Проверяем значение переменной СРАЗУ после загрузки
+spreadsheet_id_value = os.getenv("SPREADSHEET_ID")
+print(
+    f"Значение SPREADSHEET_ID после load_dotenv(): '{spreadsheet_id_value}'"
+)  # Покажет, что считалось
+# --- КОНЕЦ ОТЛАДОЧНЫХ ВЫВОДОВ ---
 
 # === Настройка логирования ===
 logging.basicConfig(
@@ -24,7 +39,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Таблица сделок")  # Имя листа по умолчанию
 # Путь к файлу credentials.json, который должен лежать рядом со скриптом ИЛИ в секретах Render
 # Если используешь секретный файл Render, путь будет /etc/secrets/credentials.json
-CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "/etc/secrets/credentials.json")
+CREDENTIALS_PATH = "credentials.json"
 # Индексы столбцов (начиная с 0) для структуры A-AC (29 столбцов)
 # ВНИМАНИЕ: Перепроверь соответствие твоей финальной структуре таблицы!
 COL_IDX = {
@@ -80,57 +95,23 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
 
 
 def send_telegram_notification(message):
-    """Отправляет уведомление в Telegram."""
+    """Отправляет простое текстовое уведомление в Telegram."""
     if bot and TELEGRAM_CHAT_ID:
         try:
             logger.info(
-                f"Sending notification to Telegram chat ID {TELEGRAM_CHAT_ID}..."
+                f"Sending plain text notification to Telegram chat ID {TELEGRAM_CHAT_ID}..."
             )
-            # Отправляем сообщение с поддержкой Markdown V2 (более строгий)
-            # Заменяем некоторые символы, чтобы избежать ошибок парсинга
-            safe_message = (
-                message.replace(".", "\\.")
-                .replace("-", "\\-")
-                .replace("!", "\\!")
-                .replace("_", "\\_")
-                .replace("*", "\\*")
-                .replace("[", "\\[")
-                .replace("]", "\\]")
-                .replace("(", "\\(")
-                .replace(")", "\\)")
-                .replace("~", "\\~")
-                .replace("`", "\\`")
-                .replace(">", "\\>")
-                .replace("#", "\\#")
-                .replace("+", "\\+")
-                .replace("=", "\\=")
-                .replace("|", "\\|")
-                .replace("{", "\\{")
-                .replace("}", "\\}")
-                .replace("!", "\\!")
-            )
-            bot.send_message(TELEGRAM_CHAT_ID, safe_message, parse_mode="MarkdownV2")
+            # Отправляем без parse_mode
+            bot.send_message(TELEGRAM_CHAT_ID, message)
             logger.info("Notification sent successfully.")
             time.sleep(1)  # Небольшая пауза
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}", exc_info=True)
-            # Попробуем отправить без форматирования в случае ошибки
-            try:
-                logger.info("Retrying notification without Markdown...")
-                bot.send_message(TELEGRAM_CHAT_ID, message)
-                logger.info("Fallback notification sent successfully.")
-                time.sleep(1)
-            except Exception as fallback_e:
-                logger.error(
-                    f"Failed to send fallback Telegram notification: {fallback_e}",
-                    exc_info=True,
-                )
     else:
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
             logger.warning(
                 "Telegram bot object not available or chat ID missing. Cannot send notification."
             )
-        # Если токен или ID не заданы, просто ничего не делаем и не логируем как ошибку
 
 
 def connect_google_sheets():
@@ -176,45 +157,51 @@ def connect_google_sheets():
     return sheet_instance
 
 
+# ИСПРАВЛЕННАЯ ФУНКЦИЯ (заменить существующую connect_bybit)
 def connect_bybit():
-    """Подключается к Bybit API (Live или Testnet), читая ключи из Secret Files."""
+    """Подключается к Bybit API (Live или Testnet), читая ключи из ПЕРЕМЕННЫХ ОКРУЖЕНИЯ."""
+    # Определяем окружение ('LIVE' по умолчанию)
     env = os.getenv("BYBIT_ENV", "LIVE").upper()
     logger.info(f"Attempting to connect to Bybit {env} environment...")
 
+    api_key = None
+    api_secret = None
+    testnet_flag = False
+
+    # Выбираем правильные переменные для ключей
     if env == "TESTNET":
-        key_path = "/etc/secrets/BYBIT_API_KEY_TESTNET"
-        secret_path = "/etc/secrets/BYBIT_API_SECRET_TESTNET"
+        api_key = os.getenv("BYBIT_API_KEY_TESTNET")
+        api_secret = os.getenv("BYBIT_API_SECRET_TESTNET")
         testnet_flag = True
-    else:
-        env = "LIVE"
-        key_path = "/etc/secrets/BYBIT_API_KEY_LIVE"
-        secret_path = "/etc/secrets/BYBIT_API_SECRET_LIVE"
-        testnet_flag = False
-
-    session = None
-    if not os.path.exists(key_path):
-        logger.error(f"FATAL: Bybit API Key file not found for {env} at {key_path}!")
-        return None
-    if not os.path.exists(secret_path):
-        logger.error(
-            f"FATAL: Bybit API Secret file not found for {env} at {secret_path}!"
-        )
-        return None
-
-    try:
-        with open(key_path, "r") as f:
-            api_key = f.read().strip()
-        with open(secret_path, "r") as f:
-            api_secret = f.read().strip()
-
         if not api_key or not api_secret:
-            logger.error(f"FATAL: Bybit API Key or Secret file for {env} is empty!")
+            logger.error(
+                "FATAL: BYBIT_API_KEY_TESTNET or BYBIT_API_SECRET_TESTNET environment variable not set!"
+            )
+            return None
+    else:  # По умолчанию или если BYBIT_ENV="LIVE"
+        env = "LIVE"
+        api_key = os.getenv("BYBIT_API_KEY_LIVE")
+        api_secret = os.getenv("BYBIT_API_SECRET_LIVE")
+        testnet_flag = False
+        if not api_key or not api_secret:
+            logger.error(
+                "FATAL: BYBIT_API_KEY_LIVE or BYBIT_API_SECRET_LIVE environment variable not set!"
+            )
             return None
 
+    session = None
+    try:
+        # Подключаемся с правильным флагом testnet и ключами из переменных окружения
         session = HTTP(testnet=testnet_flag, api_key=api_key, api_secret=api_secret)
         logger.info(
-            f"Successfully initialized Bybit API connection for {env} (credentials loaded from files)."
+            f"Successfully initialized Bybit API connection for {env} (credentials loaded from environment)."
         )
+        # Опционально: можно добавить тестовый запрос для проверки ключей
+        # logger.info(f"Trying to get wallet balance to check keys...")
+        # balance_check = session.get_wallet_balance(accountType="UNIFIED")
+        # if balance_check.get('retCode') != 0:
+        #      logger.error(f"Bybit API connection check failed: {balance_check}")
+        #      return None
     except Exception as e:
         logger.error(f"FATAL: Error connecting to Bybit {env} API: {e}", exc_info=True)
         session = None
@@ -254,10 +241,14 @@ def get_existing_exec_ids(sheet_instance):
 
 def fetch_bybit_closed_pnl(session, start_time_ms=None, end_time_ms=None, limit=50):
     """Запрашивает историю закрытых PNL с Bybit с пагинацией."""
-    # (Код этой функции остается таким же, как в предыдущей версии)
     logger.info(
         f"Fetching closed PNL from Bybit (Category: {BYBIT_CATEGORY}, Limit: {limit})..."
     )
+    # --- ДОБАВЛЕНО ДЛЯ ОТЛАДКИ ---
+    logger.info(
+        f"DEBUG: Requesting Bybit with Start MS: {start_time_ms}, End MS: {end_time_ms}"
+    )  # Используем INFO для видимости
+    # ---------------------------
     all_results = []
     cursor = None
     page_count = 0
@@ -276,8 +267,14 @@ def fetch_bybit_closed_pnl(session, start_time_ms=None, end_time_ms=None, limit=
             if cursor:
                 params["cursor"] = cursor
 
-            logger.debug(f"Requesting Bybit page {page_count} with params: {params}")
+            logger.debug(
+                f"Requesting Bybit page {page_count} with params: {params}"
+            )  # Оставим DEBUG для деталей запроса
             response = session.get_closed_pnl(**params)
+            # --- ДОБАВЛЕНО ДЛЯ ОТЛАДКИ ---
+            # Логируем сырой ответ с уровнем INFO, чтобы точно увидеть
+            logger.info(f"DEBUG: Raw Bybit Response (Page {page_count}): {response}")
+            # ---------------------------
 
             if response and response.get("retCode") == 0:
                 result = response.get("result", {})
@@ -298,24 +295,34 @@ def fetch_bybit_closed_pnl(session, start_time_ms=None, end_time_ms=None, limit=
                     logger.info("No more pages (nextPageCursor is empty).")
                     break
                 else:
+                    # Логируем только часть курсора для краткости
+                    log_cursor = (
+                        cursor[:10] + "..." if cursor and len(cursor) > 10 else cursor
+                    )
                     logger.info(
-                        f"Found nextPageCursor: {cursor[:10]}... Fetching next page..."
+                        f"Found nextPageCursor: {log_cursor}. Fetching next page..."
                     )
                     time.sleep(0.5)  # Пауза между запросами API
             else:
+                # Логируем ошибку, если retCode не 0
                 logger.error(
-                    f"Error response fetching closed PNL from Bybit: {response}"
+                    f"Error response fetching closed PNL from Bybit (retCode={response.get('retCode')}, retMsg='{response.get('retMsg')}'). Response: {response}"
                 )
                 break  # Выходим при ошибке API
+
+        # Проверка, если достигли лимита страниц
         if page_count >= max_pages:
             logger.warning(
-                f"Reached maximum page limit ({max_pages}). Stopped fetching."
+                f"Reached maximum page limit ({max_pages}). Stopped fetching potentially incomplete data."
             )
-        logger.info(f"Total closed PNL records fetched: {len(all_results)}")
-        return all_results
+
     except Exception as e:
         logger.error(f"Exception during Bybit API call: {e}", exc_info=True)
+        # Возвращаем пустой список в случае исключения
         return []
+
+    logger.info(f"Total closed PNL records fetched: {len(all_results)}")
+    return all_results
 
 
 def parse_and_prepare_sheet_data(pnl_records, existing_ids):
