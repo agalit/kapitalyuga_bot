@@ -26,7 +26,7 @@ CREDENTIALS_PATH = "/etc/secrets/credentials.json"  # Путь к секретн
 
 # === Инициализация ===
 logger.info("Initializing bot...")
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 logger.info("Initializing Flask app...")
 app = Flask(__name__)
 
