@@ -307,6 +307,15 @@ def close_trade(message):
         bot.reply_to(message, "Ошибка при закрытии сделки.")
 
 
+@bot.message_handler(func=lambda message: True)  # Этот обработчик ловит ЛЮБОЕ сообщение
+def echo_all(message):
+    logger.info(
+        f"Catch-all handler received message: '{message.text}' from {message.chat.id}"
+    )
+    # Можно раскомментировать следующую строку, чтобы бот отвечал тем же сообщением
+    # bot.reply_to(message, f"Catch-all received: {message.text}")
+
+
 # === Webhook-роут ===
 # Этот роут принимает обновления от Telegram
 @app.route(f"/{TOKEN}", methods=["POST"])
