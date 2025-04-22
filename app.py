@@ -97,7 +97,7 @@ def handle_add(message):
     logger.info(f"Received /add command from {chat_id}: {message.text}")
 
     if not bot:
-        return  # Проверка инициализации бота
+        return
     if not sheet:
         logger.error("Google Sheet object is not initialized. Cannot process /add.")
         bot.reply_to(
@@ -125,20 +125,18 @@ def handle_add(message):
         entry_time = now.strftime("%H:%M:%S")
 
         # Формируем строку для A-AC (29 столбцов)
-        # Заполняем: A, B, E, F, G, H, I, J. Остальное - пустые строки
-        # Индексы:   0, 1, 4, 5, 6, 7, 8, 9
-        new_row = [""] * EXPECTED_COLUMNS  # Создаем список из 29 пустых строк
+        new_row_data = [""] * EXPECTED_COLUMNS  # Создаем список из 29 пустых строк
 
         try:
-            new_row[0] = entry_date  # A: Дата ВХОДА
-            new_row[1] = entry_time  # B: Время ВХОДА
+            new_row_data[0] = entry_date  # A: Дата ВХОДА
+            new_row_data[1] = entry_time  # B: Время ВХОДА
             # C, D (Выход) - остаются ""
-            new_row[4] = asset  # E: Торгуемая пара
-            new_row[5] = direction  # F: Тип сделки
-            new_row[6] = float(entry_price_str)  # G: Цена входа
-            new_row[7] = float(sl_str)  # H: Уровень Stop Loss
-            new_row[8] = float(tp_str)  # I: Уровень Take Profit
-            new_row[9] = float(amount_str)  # J: Объём сделки (в монетах)
+            new_row_data[4] = asset  # E: Торгуемая пара
+            new_row_data[5] = direction  # F: Тип сделки
+            new_row_data[6] = float(entry_price_str)  # G: Цена входа
+            new_row_data[7] = float(sl_str)  # H: Уровень Stop Loss
+            new_row_data[8] = float(tp_str)  # I: Уровень Take Profit
+            new_row_data[9] = float(amount_str)  # J: Объём сделки (в монетах)
             # K-AC остаются "" (или будут рассчитаны формулами в таблице)
 
         except ValueError as e:
@@ -160,16 +158,61 @@ def handle_add(message):
             )
             return
 
-        logger.debug(f"Prepared row data (len={len(new_row)}): {new_row}")
+        logger.debug(f"Prepared row data (len={len(new_row_data)}): {new_row_data}")
 
-        # Добавляем строку в таблицу
-        sheet.append_row(new_row, value_input_option="USER_ENTERED")
-        logger.info(f"Appended row for {asset} to Google Sheet initiated by {chat_id}.")
-        bot.reply_to(message, f"Сделка по {asset} добавлена!")
+        # --- ИЗМЕНЕНИЕ ЛОГИКИ: Вместо append_row ищем следующую пустую строку ---
+        try:
+            # Получаем все значения из первого столбца (A: Дата ВХОДА)
+            col_a_values = sheet.col_values(1)  # col_values нумерует с 1
+            # Ищем индекс последней непустой ячейки в столбце A
+            last_data_row_index = (
+                len(col_a_values) - 1
+            )  # Индекс последней строки с ЛЮБЫМ значением
+            while last_data_row_index > 0 and col_a_values[last_data_row_index] == "":
+                last_data_row_index -= 1
+
+            # Номер строки для вставки = индекс последней строки с данными + 1 (для 1-based нумерации) + 1 (для след. строки)
+            insert_row_number = last_data_row_index + 2
+            logger.info(
+                f"Found last data in column A at index {last_data_row_index}. Inserting new row at sheet row {insert_row_number}."
+            )
+
+            # Вставляем данные в найденную строку
+            # ВАЖНО: insert_row может сдвинуть формулы ниже, если они есть.
+            # Если формулы протянуты на много строк вперед, лучше использовать update диапазона.
+            # Попробуем сначала insert_row, он проще.
+            sheet.insert_row(
+                new_row_data, index=insert_row_number, value_input_option="USER_ENTERED"
+            )
+
+            # Альтернатива (если insert_row сдвигает формулы):
+            # target_range = f"A{insert_row_number}:{gspread.utils.rowcol_to_a1(insert_row_number, EXPECTED_COLUMNS)}"
+            # sheet.update(target_range, [new_row_data], value_input_option='USER_ENTERED')
+            # logger.info(f"Updated range {target_range} for new trade.")
+
+            logger.info(
+                f"Inserted row for {asset} to Google Sheet at row {insert_row_number} initiated by {chat_id}."
+            )
+            bot.reply_to(
+                message, f"Сделка по {asset} добавлена в строку {insert_row_number}!"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Error finding insert row or inserting data: {e}", exc_info=True
+            )
+            # Если вставка не удалась, пробуем старый append_row как запасной вариант? Или просто сообщаем об ошибке.
+            # bot.reply_to(message, "Ошибка при вставке строки, попробуйте добавить вручную или проверьте таблицу.")
+            # Пока оставим так, чтобы видеть ошибку.
+            # Можно раскомментировать append_row ниже как fallback:
+            # logger.warning("Inserting row failed, falling back to append_row")
+            # sheet.append_row(new_row_data, value_input_option="USER_ENTERED")
+            # bot.reply_to(message, f"Сделка по {asset} добавлена в конец таблицы (ошибка вставки).")
+            raise  # Передаем ошибку дальше, чтобы увидеть traceback в логах
 
     except Exception as e:
         logger.error(
-            f"Error processing /add command from {chat_id}: {e}", exc_info=True
+            f"General error processing /add command from {chat_id}: {e}", exc_info=True
         )
         bot.reply_to(message, "Произошла непредвиденная ошибка при добавлении сделки.")
 
