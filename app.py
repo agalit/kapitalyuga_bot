@@ -9,21 +9,21 @@ from google.oauth2.service_account import Credentials
 from pybit.unified_trading import HTTP
 from telebot import types
 
-# === Настройка логирования ===
+# === Logging ===
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# === Переменные окружения ===
+# === Environment ===
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Таблица сделок")
 CREDENTIALS_PATH = "/etc/secrets/credentials.json"
-BYBIT_ENV = os.getenv("BYBIT_ENV", "TESTNET").upper()
+BYBIT_ENV = os.getenv("BYBIT_ENV", "TESTNET").upper()  # TESTNET или LIVE
 BYBIT_CATEGORY = os.getenv("BYBIT_CATEGORY", "linear")
 
-# Индексы столбцов A-AD
+# Колонки A–AD (0–29)
 COL_IDX = {
     "entry_date": 0,
     "entry_time": 1,
@@ -58,13 +58,13 @@ COL_IDX = {
 }
 EXPECTED_COLUMNS = 30
 
-# === Инициализация ===
+# === Globals ===
 app = Flask(__name__)
 bot = None
 sheet = None
 bybit_session = None
 
-# === Telegram Bot ===
+# === Telegram Bot Init ===
 if TOKEN:
     try:
         bot = telebot.TeleBot(TOKEN, threaded=False)
@@ -75,7 +75,7 @@ else:
     logger.error("TELEGRAM_BOT_TOKEN not set!")
 
 
-# === Google Sheets ===
+# === Google Sheets Init ===
 def init_google_sheets():
     global sheet
     if not SPREADSHEET_ID or not os.path.exists(CREDENTIALS_PATH):
@@ -104,11 +104,10 @@ def init_google_sheets():
         return False
 
 
-# === Bybit API ===
+# === Bybit Init ===
 def init_bybit():
     global bybit_session
     testnet = BYBIT_ENV == "TESTNET"
-    # Читаем секретные файлы
     key_file = f"/etc/secrets/BYBIT_API_KEY_{BYBIT_ENV}"
     secret_file = f"/etc/secrets/BYBIT_API_SECRET_{BYBIT_ENV}"
     try:
@@ -120,18 +119,18 @@ def init_bybit():
         logger.error(f"Error reading Bybit secrets: {e}", exc_info=True)
         return False
     if not api_key or not api_secret:
-        logger.error("Bybit API key/secret is empty.")
+        logger.error("Bybit API credentials empty.")
         return False
     try:
         bybit_session = HTTP(testnet=testnet, api_key=api_key, api_secret=api_secret)
-        logger.info(f"Bybit API initialized for {'TESTNET' if testnet else 'LIVE'}.")
+        logger.info(f"Bybit API initialized for {BYBIT_ENV}.")
         return True
     except Exception as e:
         logger.error(f"Error initializing Bybit API: {e}", exc_info=True)
         return False
 
 
-# === Утилиты ===
+# === Utility ===
 def find_next_empty_row(sheet_instance, column_index=1):
     try:
         vals = sheet_instance.col_values(
@@ -146,12 +145,12 @@ def find_next_empty_row(sheet_instance, column_index=1):
         return None
 
 
-# Запуск инициализация
+# Run initializations
 init_google_sheets()
 init_bybit()
 
 
-# === Меню и шаговые хендлеры ===
+# === Menu and Step Handlers ===
 @bot.message_handler(commands=["start", "menu"])
 def handle_menu(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -168,96 +167,16 @@ def hide_menu(message):
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "Добавить сделку")
-def kb_add(message):
-    bot.send_message(
-        message.chat.id,
-        "Введите данные в формате:\n/add <Пара> <Лонг|Шорт> <Вход> <TP> <SL> <Объем> <OrderID>",
-    )
-
-
-@bot.message_handler(func=lambda m: m.text == "Подтянуть исполнение")
-def kb_fetch(message):
-    msg = bot.send_message(message.chat.id, "Введите OrderID для /fetch:")
-    bot.register_next_step_handler(msg, process_fetch)
-
-
-def process_fetch(message):
-    order_id = message.text.strip()
-    fake = type("F", (), {})()
-    fake.text = f"/fetch {order_id}"
-    fake.chat = message.chat
-    handle_fetch(fake)
-
-
-@bot.message_handler(func=lambda m: m.text == "Закрыть сделку")
-def kb_close(message):
-    msg = bot.send_message(message.chat.id, "Введите цену выхода:")
-    bot.register_next_step_handler(msg, process_close)
-
-
-def process_close(message):
-    price = message.text.strip()
-    fake = type("F", (), {})()
-    fake.text = f"/close {price}"
-    fake.chat = message.chat
-    handle_close(fake)
-
-
-@bot.message_handler(func=lambda m: m.text == "Добавить по ID")
-def kb_addid(message):
-    msg = bot.send_message(message.chat.id, "Введите OrderID для автодобавления:")
-    bot.register_next_step_handler(msg, process_addid)
-
-
-# Заменяем весь текущий process_addid на этот:
-
-
-def process_addid(message):
-    order_id = message.text.strip()
-    try:
-        # query_active_order — именно этот метод есть в unified_trading.HTTP
-        resp = bybit_session.query_active_order(
-            category=BYBIT_CATEGORY, symbol="BTCUSDT", orderId=order_id
-        )
-    except Exception as e:
-        logger.error(f"Error fetching active order: {e}", exc_info=True)
-        return bot.send_message(message.chat.id, f"Ошибка запроса ордера: {e}")
-
-    # Проверяем, что Bybit вернул успешный ответ
-    if not resp or resp.get("retCode") != 0:
-        return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
-
-    data = resp["result"]
-    side = "Лонг" if data.get("side") == "Buy" else "Шорт"
-    entry = data.get("price")
-    tp = data.get("takeProfit") or 0
-    sl = data.get("stopLoss") or 0
-    qty = data.get("qty")
-
-    # Формируем команду /add и вызываем handle_add
-    cmd = f"/add BTC/USDT {side} {entry} {tp} {sl} {qty} {order_id}"
-    fake = type("F", (), {})()
-    fake.text = cmd
-    fake.chat = message.chat
-    handle_add(fake)
-
-    bot.send_message(message.chat.id, f"Сделка добавлена автоматически:\n{cmd}")
-
-
-# === Существующие команды /add, /fetch, /close ===
-# Скопируйте сюда ваши реализационные хендлеры handle_add, handle_fetch, handle_close
-
-
+# === /add ===
 @bot.message_handler(commands=["add"])
 def handle_add(message):
     if not sheet:
-        return bot.reply_to(message, "Ошибка: нет Google Sheets.")
+        return bot.reply_to(message, "Ошибка: нет подключения к Google Sheets.")
     parts = message.text.split()
     if len(parts) != 8:
         return bot.reply_to(
             message,
-            "Неверный формат! Пример: /add SOL/USDT Лонг 139.19 141.8 136.9 1.5 12345",
+            "Неверный формат.\nПример: /add SOL/USDT Лонг 139.19 141.8 136.9 1.5 12345",
             parse_mode="Markdown",
         )
     _, asset, direction, entry_s, tp_s, sl_s, qty_s, order_id = parts
@@ -266,7 +185,7 @@ def handle_add(message):
     entry_time = now.strftime("%H:%M:%S")
     row = find_next_empty_row(sheet)
     if not row:
-        return bot.reply_to(message, "Ошибка: не нашёл пустую строку.")
+        return bot.reply_to(message, "Не удалось найти пустую строку.")
     try:
         updates = [
             {"range": f"A{row}", "values": [[entry_date]]},
@@ -285,10 +204,11 @@ def handle_add(message):
     bot.reply_to(message, f"Сделка {asset} добавлена в строку {row}.")
 
 
+# === /fetch ===
 @bot.message_handler(commands=["fetch"])
 def handle_fetch(message):
     if not sheet or not bybit_session:
-        return bot.reply_to(message, "Ошибка: нет Google Sheets или Bybit.")
+        return bot.reply_to(message, "Ошибка подключения.")
     parts = message.text.split()
     if len(parts) != 2:
         return bot.reply_to(message, "Используйте: /fetch <OrderID>")
@@ -297,7 +217,7 @@ def handle_fetch(message):
         orderId=order_id, category=BYBIT_CATEGORY, limit=10
     )
     if not resp or resp.get("retCode") != 0:
-        return bot.reply_to(message, f'Ошибка: {resp.get("retMsg")}')
+        return bot.reply_to(message, f"Ошибка: {resp.get('retMsg')}")
     lst = resp["result"]["list"]
     if not lst:
         return bot.reply_to(message, "Нет исполнений.")
@@ -308,29 +228,26 @@ def handle_fetch(message):
         sum(float(i.get("execQty", 0)) * float(i.get("execPrice", 0)) for i in lst)
         / total_qty
     )
-    dt = datetime.datetime.fromtimestamp(int(lst[0]["execTime"]) / 1000)
-    entry_date, entry_time = dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M:%S")
-    asset = first.get("symbol")
-    direction = "Лонг" if first.get("side") == "Buy" else "Шорт"
-    tp = first.get("takeProfit", "")
-    sl = first.get("stopLoss", "")
+    dt = datetime.datetime.fromtimestamp(int(first["execTime"]) / 1000)
     row = find_next_empty_row(sheet)
     updates = [
-        {"range": f"A{row}", "values": [[entry_date]]},
-        {"range": f"B{row}", "values": [[entry_time]]},
-        {"range": f"E{row}", "values": [[asset]]},
-        {"range": f"F{row}", "values": [[direction]]},
+        {"range": f"A{row}", "values": [[dt.strftime("%d.%m.%Y")]]},
+        {"range": f"B{row}", "values": [[dt.strftime("%H:%M:%S")]]},
+        {"range": f"E{row}", "values": [[first.get("symbol")]]},
+        {
+            "range": f"F{row}",
+            "values": [["Лонг" if first.get("side") == "Buy" else "Шорт"]],
+        },
         {"range": f"G{row}", "values": [[avg_price]]},
-        {"range": f"H{row}", "values": [[float(sl) if sl else ""]]},
-        {"range": f"I{row}", "values": [[float(tp) if tp else ""]]},
         {"range": f"J{row}", "values": [[total_qty]]},
         {"range": f"Q{row}", "values": [[total_fee]]},
         {"range": f"AD{row}", "values": [[order_id]]},
     ]
     sheet.batch_update(updates, value_input_option="USER_ENTERED")
-    bot.reply_to(message, f"Fetch done, row {row}.")
+    bot.reply_to(message, f"Исполнение добавлено, строка {row}.")
 
 
+# === /close ===
 @bot.message_handler(commands=["close"])
 def handle_close(message):
     if not sheet:
@@ -338,30 +255,60 @@ def handle_close(message):
     parts = message.text.split()
     if len(parts) != 3:
         return bot.reply_to(message, "Используйте: /close <Пара> <Цена>")
-    _, asset_to_close, exit_price_s = parts
+    asset, price_s = parts[1], parts[2]
     try:
-        exit_price = float(exit_price_s)
+        price = float(price_s)
     except ValueError:
-        return bot.reply_to(message, "Ошибка цены")
-    dt = datetime.datetime.now()
-    exit_date, exit_time = dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M:%S")
+        return bot.reply_to(message, "Неверная цена.")
+    now = datetime.datetime.now()
     data = sheet.get_all_values()
     header = data[0]
     ai = header.index("Торгуемая пара")
-    ei = header.index("Фактическая цена выхода ($)")
-    for i in range(len(data) - 1, 0, -1):
-        row = data[i]
-        if len(row) > ei and row[ai] == asset_to_close and not row[ei]:
-            num = i + 1
-            upd = [
-                {"range": f"C{num}", "values": [[exit_date]]},
-                {"range": f"D{num}", "values": [[exit_time]]},
-                {"range": f"S{num}", "values": [["вручную"]]},
-                {"range": f"T{num}", "values": [[exit_price]]},
+    ti = header.index("Фактическая цена выхода")
+    for i, row_vals in reversed(list(enumerate(data[1:], start=2))):
+        if row_vals[ai] == asset and not row_vals[ti]:
+            updates = [
+                {"range": f"C{i}", "values": [[now.strftime("%d.%m.%Y")]]},
+                {"range": f"D{i}", "values": [[now.strftime("%H:%M:%S")]]},
+                {"range": f"S{i}", "values": [["вручную"]]},
+                {"range": f"T{i}", "values": [[price]]},
             ]
-            sheet.batch_update(upd, value_input_option="USER_ENTERED")
-            return bot.reply_to(message, f"Закрыл row {num}.")
-    bot.reply_to(message, "Не найдено.")
+            sheet.batch_update(updates, value_input_option="USER_ENTERED")
+            return bot.reply_to(message, f"Сделка {asset} закрыта.")
+    bot.reply_to(message, "Не найдена открытая сделка.")
+
+
+# === Add by ID ===
+@bot.message_handler(func=lambda m: m.text == "Добавить по ID")
+def kb_addid(message):
+    msg = bot.send_message(message.chat.id, "Введите OrderID для автодобавления:")
+    bot.register_next_step_handler(msg, process_addid)
+
+
+def process_addid(message):
+    order_id = message.text.strip()
+    try:
+        resp = bybit_session.get_executions(
+            orderId=order_id, category=BYBIT_CATEGORY, limit=1
+        )
+    except Exception as e:
+        logger.error(f"Error fetching executions: {e}", exc_info=True)
+        return bot.send_message(message.chat.id, f"Ошибка запроса: {e}")
+    if not resp or resp.get("retCode") != 0:
+        return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
+    exec_item = resp["result"]["list"][0]
+    symbol = exec_item.get("symbol")
+    side = "Лонг" if exec_item.get("side") == "Buy" else "Шорт"
+    entry_price = float(exec_item.get("execPrice", exec_item.get("orderPrice", 0)))
+    qty = float(exec_item.get("execQty", 0))
+    tp = float(exec_item.get("takeProfit") or 0)
+    sl = float(exec_item.get("stopLoss") or 0)
+    cmd = f"/add {symbol} {side} {entry_price} {tp} {sl} {qty} {order_id}"
+    fake = type("F", (), {})()
+    fake.text = cmd
+    fake.chat = message.chat
+    handle_add(fake)
+    bot.send_message(message.chat.id, f"Сделка добавлена автоматически:\n{cmd}")
 
 
 # === Webhook ===
