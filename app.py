@@ -210,28 +210,39 @@ def kb_addid(message):
     bot.register_next_step_handler(msg, process_addid)
 
 
+# Заменяем весь текущий process_addid на этот:
+
+
 def process_addid(message):
     order_id = message.text.strip()
     try:
-        resp = bybit_session.get_active_orders(symbol="BTCUSDT", orderId=order_id)
+        # query_active_order — именно этот метод есть в unified_trading.HTTP
+        resp = bybit_session.query_active_order(
+            category=BYBIT_CATEGORY, symbol="BTCUSDT", orderId=order_id
+        )
     except Exception as e:
-        return bot.send_message(message.chat.id, f"Ошибка запроса: {e}")
+        logger.error(f"Error fetching active order: {e}", exc_info=True)
+        return bot.send_message(message.chat.id, f"Ошибка запроса ордера: {e}")
+
+    # Проверяем, что Bybit вернул успешный ответ
     if not resp or resp.get("retCode") != 0:
         return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
-    orders = resp.get("result", {}).get("list", [])
-    if not orders:
-        return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
-    data = orders[0]
+
+    data = resp["result"]
     side = "Лонг" if data.get("side") == "Buy" else "Шорт"
     entry = data.get("price")
     tp = data.get("takeProfit") or 0
     sl = data.get("stopLoss") or 0
     qty = data.get("qty")
+
+    # Формируем команду /add и вызываем handle_add
     cmd = f"/add BTC/USDT {side} {entry} {tp} {sl} {qty} {order_id}"
     fake = type("F", (), {})()
     fake.text = cmd
     fake.chat = message.chat
     handle_add(fake)
+
+    bot.send_message(message.chat.id, f"Сделка добавлена автоматически:\n{cmd}")
 
 
 # === Существующие команды /add, /fetch, /close ===
