@@ -1,10 +1,10 @@
 import os
 import logging
 import datetime
+
 import telebot
 import gspread
 from flask import Flask, request
-
 from google.oauth2.service_account import Credentials
 from pybit.unified_trading import HTTP
 from telebot import types
@@ -20,10 +20,10 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Таблица сделок")
 CREDENTIALS_PATH = "/etc/secrets/credentials.json"
-BYBIT_ENV = os.getenv("BYBIT_ENV", "LIVE").upper()
+BYBIT_ENV = os.getenv("BYBIT_ENV", "TESTNET").upper()  # TESTNET или LIVE
 BYBIT_CATEGORY = os.getenv("BYBIT_CATEGORY", "linear")
 
-# Индексы столбцов A-AD
+# Индексы столбцов A-AD (0-29)
 COL_IDX = {
     "entry_date": 0,
     "entry_time": 1,
@@ -70,13 +70,12 @@ if TOKEN:
         bot = telebot.TeleBot(TOKEN, threaded=False)
         logger.info("Telegram bot initialized.")
     except Exception as e:
-        logger.error(f"Failed to initialize Telegram bot: {e}", exc_info=True)
+        logger.error(f"Telegram init error: {e}", exc_info=True)
 
 
 # === Инициализация Google Sheets ===
 def init_google_sheets():
     global sheet
-    logger.info("Connecting to Google Sheets...")
     if not SPREADSHEET_ID or not os.path.exists(CREDENTIALS_PATH):
         logger.error("Missing SPREADSHEET_ID or credentials file.")
         return False
@@ -106,7 +105,6 @@ def init_google_sheets():
 # === Инициализация Bybit API ===
 def init_bybit():
     global bybit_session
-    logger.info(f"Connecting to Bybit {BYBIT_ENV}...")
     testnet = BYBIT_ENV == "TESTNET"
     key_name = "BYBIT_API_KEY_TESTNET" if testnet else "BYBIT_API_KEY_LIVE"
     secret_name = "BYBIT_API_SECRET_TESTNET" if testnet else "BYBIT_API_SECRET_LIVE"
@@ -124,7 +122,7 @@ def init_bybit():
         return False
 
 
-# === Вспомогательные функции ===
+# === Вспомогательная функция ===
 def find_next_empty_row(sheet_instance, column_index=1):
     try:
         vals = sheet_instance.col_values(
@@ -139,17 +137,17 @@ def find_next_empty_row(sheet_instance, column_index=1):
         return None
 
 
-# === Инициализация при старте ===
+# === Запуск инициализация при старте ===
 if not init_google_sheets():
     logger.error("Google Sheets init failed.")
 if not init_bybit():
     logger.error("Bybit init failed.")
 
 
-# === Обработчики команд и меню ===
+# === Меню и хендлеры ===
 @bot.message_handler(commands=["start", "menu"])
 def handle_menu(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("Добавить сделку", "Подтянуть исполнение")
     markup.row("Закрыть сделку", "Добавить по ID")
     markup.row("Скрыть меню")
@@ -167,23 +165,77 @@ def hide_menu(message):
 def kb_add(message):
     bot.send_message(
         message.chat.id,
-        "Используйте: /add <Пара> <Лонг|Шорт> <Вход> <TP> <SL> <Объем> <OrderID>",
+        "Введите данные сделки в формате:\n"
+        "/add <Пара> <Лонг|Шорт> <Вход> <TP> <SL> <Объем> <OrderID>",
     )
 
 
 @bot.message_handler(func=lambda m: m.text == "Подтянуть исполнение")
 def kb_fetch(message):
-    bot.send_message(message.chat.id, "Используйте: /fetch <OrderID>")
+    bot.send_message(message.chat.id, "Введите ID ордера без команды:\n" "<OrderID>")
+    msg = bot.send_message(message.chat.id, "OrderID:")
+    bot.register_next_step_handler(msg, process_fetch)
 
 
-@bot.message_handler(func=lambda m: m.text == "Закрыть сделку")
-def kb_close(message):
-    bot.send_message(message.chat.id, "Используйте: /close <Пара> <Цена_выхода>")
+def process_fetch(message):
+    order_id = message.text.strip()
+    resp = bybit_session.get_executions(
+        orderId=order_id, category=BYBIT_CATEGORY, limit=10
+    )
+    if not resp or resp.get("retCode") != 0:
+        return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
+    # вызов стандартного handle_fetch
+    fake = type("F", (), {})
+    fake_msg = fake()
+    fake_msg.text = f"/fetch {order_id}"
+    fake_msg.chat = message.chat
+    handle_fetch(fake_msg)
 
 
 @bot.message_handler(func=lambda m: m.text == "Добавить по ID")
 def kb_addid(message):
-    bot.send_message(message.chat.id, "Используйте: /addid <OrderID>")
+    msg = bot.send_message(
+        message.chat.id, "Введите OrderID для автоматического добавления:"
+    )
+    bot.register_next_step_handler(msg, process_addid)
+
+
+def process_addid(message):
+    order_id = message.text.strip()
+    resp = bybit_session.query_active_order(symbol="BTCUSDT", order_id=order_id)
+    if not resp or resp.get("retCode", resp.get("ret_code", 1)) != 0:
+        return bot.send_message(message.chat.id, f"Ордер {order_id} не найден.")
+    data = resp["result"]
+    side = "Лонг" if data.get("side") == "Buy" else "Шорт"
+    entry = data.get("price")
+    tp = data.get("take_profit") or 0
+    sl = data.get("stop_loss") or 0
+    qty = data.get("qty")
+    cmd = f"/add BTC/USDT {side} {entry} {tp} {sl} {qty} {order_id}"
+    fake = type("F", (), {})
+    fake_msg = fake()
+    fake_msg.text = cmd
+    fake_msg.chat = message.chat
+    handle_add(fake_msg)
+
+
+@bot.message_handler(func=lambda m: m.text == "Закрыть сделку")
+def kb_close(message):
+    bot.send_message(message.chat.id, "Введите цену выхода без команды:\n" "<Цена>")
+    msg = bot.send_message(message.chat.id, "Цена:")
+    bot.register_next_step_handler(msg, process_close)
+
+
+def process_close(message):
+    fake = type("F", (), {})
+    fake_msg = fake()
+    fake_msg.text = f"/close {message.text.strip()}"
+    fake_msg.chat = message.chat
+    handle_close(fake_msg)
+
+
+# === Существующие команды /add, /fetch, /close ===
+# Скопируйте сюда ваши реализационные хендлеры handle_add, handle_fetch, handle_close
 
 
 @bot.message_handler(commands=["add"])
@@ -304,17 +356,10 @@ def handle_close(message):
 # === Webhook ===
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    if not bot:
-        return "error", 500
-    upd = telebot.types.Update.de_json(request.get_data().decode(), bot)
-    bot.process_new_updates([upd])
+    update = telebot.types.Update.de_json(request.get_data().decode())
+    bot.process_new_updates([update])
     return "ok", 200
 
 
-# === Main ===
 if __name__ == "__main__":
-    if bot:
-        port = int(os.getenv("PORT", 10000))
-        app.run(host="0.0.0.0", port=port)
-    else:
-        logger.error("Bot not initialized.")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
