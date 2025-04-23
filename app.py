@@ -104,18 +104,36 @@ def init_google_sheets():
 
 # === Инициализация Bybit API ===
 def init_bybit():
+    """Инициализирует подключение к Bybit, читая ключи из /etc/secrets."""
     global bybit_session
     testnet = BYBIT_ENV == "TESTNET"
-    key_name = "BYBIT_API_KEY_TESTNET" if testnet else "BYBIT_API_KEY_LIVE"
-    secret_name = "BYBIT_API_SECRET_TESTNET" if testnet else "BYBIT_API_SECRET_LIVE"
-    api_key = os.getenv(key_name)
-    api_secret = os.getenv(secret_name)
-    if not api_key or not api_secret:
-        logger.error("Bybit API key/secret missing.")
+    # Получаем пути к файлам секрета
+    if testnet:
+        key_path = "/etc/secrets/BYBIT_API_KEY_TESTNET"
+        secret_path = "/etc/secrets/BYBIT_API_SECRET_TESTNET"
+    else:
+        key_path = "/etc/secrets/BYBIT_API_KEY_LIVE"
+        secret_path = "/etc/secrets/BYBIT_API_SECRET_LIVE"
+
+    # Читаем файлы
+    try:
+        with open(key_path, "r") as f:
+            api_key = f.read().strip()
+        with open(secret_path, "r") as f:
+            api_secret = f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading Bybit secret files: {e}", exc_info=True)
         return False
+
+    # Проверяем, что не пустые
+    if not api_key or not api_secret:
+        logger.error("Bybit API key or secret is empty!")
+        return False
+
+    # Инициализируем клиент
     try:
         bybit_session = HTTP(testnet=testnet, api_key=api_key, api_secret=api_secret)
-        logger.info("Bybit API initialized.")
+        logger.info(f"Bybit API initialized for {'TESTNET' if testnet else 'LIVE'}.")
         return True
     except Exception as e:
         logger.error(f"Error initializing Bybit API: {e}", exc_info=True)
