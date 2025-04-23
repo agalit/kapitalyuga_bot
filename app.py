@@ -1,4 +1,4 @@
-# --- Файл: app.py (Версия с get_order_history для /fetch) ---
+# --- Файл: app.py (Версия с execId для /fetch и кнопки) ---
 
 import os
 import logging
@@ -36,7 +36,7 @@ if not TOKEN:
 # --- Google Sheets ---
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Таблица сделок")
-CREDENTIALS_PATH = "/etc/secrets/credentials.json"
+CREDENTIALS_PATH = "/etc/secrets/credentials.json"  # Путь к секретному файлу Render
 # Индексы столбцов (A-AD, 30 столбцов)
 COL_IDX = {
     "entry_date": 0,
@@ -68,9 +68,11 @@ COL_IDX = {
     "entry_reason": 26,
     "conclusions": 27,
     "screenshot": 28,
-    "entry_order_id": 29,
+    "bybit_exec_id": 29,  # AC: Execution ID (ID Транзакции)
+    "entry_order_id": 30,  # AD: Entry Order ID
 }
-EXPECTED_COLUMNS = 30  # A-AD
+# Ожидаем 30 столбцов A-AD. Если у тебя меньше, нужно будет подогнать код
+EXPECTED_COLUMNS = 30
 
 # --- Bybit ---
 BYBIT_ENV = os.getenv("BYBIT_ENV", "LIVE").upper()
@@ -230,30 +232,32 @@ def find_next_empty_row(sheet_instance, column_index=1):
 
 
 # === Обработчики команд и Кнопок ===
-if bot:  # Только если бот инициализирован
+if bot:
 
     @bot.message_handler(commands=["start", "menu"])
     def handle_menu(message):
-        # ... (Код функции handle_menu с кнопками без изменений) ...
+        # ... (Обновим текст справки) ...
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row(
-            "Добавить сделку", "Подтянуть исполнение"
-        )  # Эти кнопки пока не обрабатываются
-        markup.row("Закрыть сделку", "Добавить по ID")
+        markup.row("Добавить вручную (/add)", "Добавить по ID Транз. (/fetch)")
+        markup.row("Закрыть сделку (/close)")
         markup.row("Скрыть меню")
-        bot.send_message(message.chat.id, "Выберите действие:", reply_markup=markup)
+        bot.send_message(
+            message.chat.id,
+            "Выберите действие или используйте команды:\n`/add <Пара> <Тип> <Вход> <TP> <SL> <Объем> <OrderID>`\n`/fetch <ExecID>`\n`/close <Пара> <ЦенаВыхода>`",
+            reply_markup=markup,
+            parse_mode="Markdown",
+        )
 
     @bot.message_handler(func=lambda m: m.text == "Скрыть меню")
     def hide_menu(message):
-        # ... (Код функции hide_menu без изменений) ...
         bot.send_message(
             message.chat.id, "Меню скрыто.", reply_markup=types.ReplyKeyboardRemove()
         )
 
-    # ОБНОВЛЕННЫЙ /add
+    # /add - для ручного ввода
     @bot.message_handler(commands=["add"])
     def handle_add(message):
-        # ... (Код функции handle_add без изменений, использует batch_update) ...
+        # ... (Код этой функции остается без изменений, ожидает 8 параметров) ...
         chat_id = message.chat.id
         logger.info(f"Received /add command from {chat_id}: {message.text}")
         if not sheet:
@@ -266,7 +270,7 @@ if bot:  # Только если бот инициализирован
                 logger.warning(f"Invalid format for /add...")
                 bot.reply_to(
                     message,
-                    "Неверный формат!\nПример:\n`/add SOL/USDT Лонг 139.19 141.8 136.9 1.5 <Bybit_Order_ID>`",
+                    "Неверный формат! Нужно 8 частей.\nПример:\n`/add SOL/USDT Лонг 139.19 141.8 136.9 1.5 <Bybit_Order_ID>`",
                     parse_mode="Markdown",
                 )
                 return
@@ -316,7 +320,7 @@ if bot:  # Только если бот инициализирован
                 )
                 updates.append(
                     {"range": f"AD{target_row_number}", "values": [[bybit_order_id]]}
-                )
+                )  # Записываем Order ID в AD
             except ValueError as e:
                 logger.error(f"ValueError converting numbers in /add: {e}")
                 bot.reply_to(message, f"Ошибка в формате чисел: {e}.")
@@ -328,13 +332,14 @@ if bot:  # Только если бот инициализирован
             )
             bot.reply_to(
                 message,
-                f"Сделка по {asset} (ID: {bybit_order_id}) добавлена в строку {target_row_number}!",
+                f"Сделка по {asset} (ID: {bybit_order_id}) ДОБАВЛЕНА ВРУЧНУЮ в строку {target_row_number}!",
             )
         except Exception as e:
             logger.error(f"Error processing /add command: {e}", exc_info=True)
             bot.reply_to(message, "Ошибка при обработке /add.")
 
     # --- ИЗМЕНЕННЫЙ /fetch ---
+    # Теперь принимает ID ТРАНЗАКЦИИ (execId)
     @bot.message_handler(commands=["fetch"])
     def handle_fetch(message):
         chat_id = message.chat.id
@@ -354,83 +359,82 @@ if bot:  # Только если бот инициализирован
             if len(parts) != 2:
                 return bot.reply_to(
                     message,
-                    "Неверный формат!\nПример:\n`/fetch <Bybit_Order_ID>`",
+                    "Неверный формат!\nПример:\n`/fetch <Bybit_Exec_ID>` (ID Транзакции)",
                     parse_mode="Markdown",
                 )
 
-            order_id_to_fetch = parts[1]
-            logger.info(f"Fetching order history for Order ID: {order_id_to_fetch}")
+            exec_id_to_fetch = parts[1]  # Теперь это execId
+            logger.info(f"Fetching execution details for Exec ID: {exec_id_to_fetch}")
 
-            # --- ИСПОЛЬЗУЕМ get_order_history ---
-            response = bybit_session.get_order_history(
-                orderId=order_id_to_fetch,
+            # --- ИСПОЛЬЗУЕМ get_executions с execId ---
+            response = bybit_session.get_executions(
+                execId=exec_id_to_fetch,
                 category=BYBIT_CATEGORY,
-                limit=1,  # Лимит 1, т.к. нужен только этот ордер
+                limit=1,  # Ищем конкретное исполнение
             )
             logger.debug(
-                f"Raw Bybit Order History response for {order_id_to_fetch}: {response}"
+                f"Raw Bybit Executions response for {exec_id_to_fetch}: {response}"
             )
-            # ------------------------------------
+            # ---------------------------------------
 
             if not (response and response.get("retCode") == 0):
-                logger.error(f"Error fetching order history from Bybit: {response}")
+                logger.error(f"Error fetching execution from Bybit: {response}")
                 return bot.reply_to(
                     message,
-                    f"Ошибка при запросе ордера {order_id_to_fetch}: {response.get('retMsg', 'Error')}",
+                    f"Ошибка при запросе транзакции {exec_id_to_fetch}: {response.get('retMsg', 'Error')}",
                 )
 
-            order_list = response.get("result", {}).get("list", [])
-            if not order_list:
-                logger.warning(f"No order found for Order ID: {order_id_to_fetch}")
+            exec_list = response.get("result", {}).get("list", [])
+            if not exec_list:
+                logger.warning(f"No execution found for Exec ID: {exec_id_to_fetch}")
                 return bot.reply_to(
                     message,
-                    f"Не найден ордер {order_id_to_fetch} в категории {BYBIT_CATEGORY}. Проверьте ID и категорию.",
+                    f"Не найдено исполнение (транзакция) с ID {exec_id_to_fetch} в категории {BYBIT_CATEGORY}.",
                 )
 
-            # Берем данные из найденного ордера
-            order_data = order_list[0]
+            # Берем данные из найденного исполнения
+            exec_item = exec_list[0]
             try:
-                asset = order_data.get("symbol", "")
-                side = order_data.get("side", "").capitalize()
+                asset = exec_item.get("symbol", "")
+                side = exec_item.get("side", "").capitalize()
                 direction = (
                     "Лонг" if side == "Buy" else ("Шорт" if side == "Sell" else side)
                 )
-                # Используем цену ордера как цену входа
-                entry_price = float(
-                    order_data.get("price") or order_data.get("avgPrice") or 0
-                )  # avgPrice может быть ценой исполнения
-                # Используем объем ордера
-                total_qty = float(order_data.get("qty", 0))
-                # Время создания ордера
-                created_time_ms = int(order_data.get("createdTime", 0))
+                # Цена входа = Цена исполнения
+                entry_price = float(exec_item.get("execPrice", 0))
+                # Объем = Объем исполнения
+                total_qty = float(exec_item.get("execQty", 0))
+                # Время входа = Время исполнения
+                exec_time_ms = int(exec_item.get("execTime", 0))
                 entry_dt = (
-                    datetime.datetime.fromtimestamp(created_time_ms / 1000)
-                    if created_time_ms > 0
+                    datetime.datetime.fromtimestamp(exec_time_ms / 1000)
+                    if exec_time_ms > 0
                     else None
                 )
                 entry_date_str = entry_dt.strftime("%d.%m.%Y") if entry_dt else ""
                 entry_time_str = entry_dt.strftime("%H:%M:%S") if entry_dt else ""
-                # SL/TP из ордера
-                tp_price_str = order_data.get("takeProfit", "")
-                sl_price_str = order_data.get("stopLoss", "")
-                # Комиссию взять неоткуда из истории ордера, оставляем пустой
+                # ID Ордера, к которому относится исполнение
+                related_order_id = exec_item.get("orderId", "")
+                # Комиссия
+                fee = float(exec_item.get("execFee", 0))
+                # SL/TP из данных исполнения обычно недоступны
 
                 if not asset or total_qty <= 0:
                     logger.error(
-                        f"Incomplete essential data from order history for {order_id_to_fetch}: {order_data}"
+                        f"Incomplete essential data from execution for {exec_id_to_fetch}: {exec_item}"
                     )
                     return bot.reply_to(
                         message,
-                        f"Не удалось извлечь основные данные (символ/объем) для ордера {order_id_to_fetch}.",
+                        f"Не удалось извлечь основные данные для транзакции {exec_id_to_fetch}.",
                     )
 
             except (ValueError, TypeError, KeyError, IndexError) as e:
                 logger.error(
-                    f"Error parsing order history data for {order_id_to_fetch}: {e}. Data: {order_data}",
+                    f"Error parsing execution data for {exec_id_to_fetch}: {e}. Data: {exec_item}",
                     exc_info=True,
                 )
                 return bot.reply_to(
-                    message, f"Ошибка обработки данных ордера {order_id_to_fetch}."
+                    message, f"Ошибка обработки данных транзакции {exec_id_to_fetch}."
                 )
 
             # Находим следующую строку
@@ -445,43 +449,49 @@ if bot:  # Только если бот инициализирован
                 {
                     "range": f"A{target_row_number}",
                     "values": [[entry_date_str]],
-                },  # Дата ВХОДА
+                },  # Дата ВХОДА (по исполнению)
                 {
                     "range": f"B{target_row_number}",
                     "values": [[entry_time_str]],
-                },  # Время ВХОДА
+                },  # Время ВХОДА (по исполнению)
                 {"range": f"E{target_row_number}", "values": [[asset]]},  # Пара
                 {"range": f"F{target_row_number}", "values": [[direction]]},  # Тип
                 {
                     "range": f"G{target_row_number}",
                     "values": [[entry_price]],
-                },  # Цена входа (по ордеру)
+                },  # Цена входа (по исполнению)
+                # H, I (SL/TP) - оставляем пустыми
                 {
-                    "range": f"H{target_row_number}",
-                    "values": [[float(sl_price_str) if sl_price_str else ""]],
-                },  # SL
+                    "range": f"J{target_row_number}",
+                    "values": [[total_qty]],
+                },  # Объем (по исполнению)
+                # K-P - расчетные
                 {
-                    "range": f"I{target_row_number}",
-                    "values": [[float(tp_price_str) if tp_price_str else ""]],
-                },  # TP
-                {"range": f"J{target_row_number}", "values": [[total_qty]]},  # Объем
-                # Q (Комиссия входа) - пусто
+                    "range": f"Q{target_row_number}",
+                    "values": [[fee]],
+                },  # Комиссия входа (по исполнению)
+                # R - пусто
+                # S (Метод выхода) - пусто
+                # T (Цена выхода) - пусто
+                # U-AC - расчетные/пустые
                 {
                     "range": f"AD{target_row_number}",
-                    "values": [[order_id_to_fetch]],
-                },  # Entry Order ID
+                    "values": [[related_order_id]],
+                },  # ID Ордера входа записываем сюда
+                # AC (Bybit ID) - можно записать exec_id_to_fetch, если нужно
+                # {'range': f'AC{target_row_number}', 'values': [[exec_id_to_fetch]]}
             ]
 
             logger.debug(
-                f"Prepared batch update data for /fetch (using order history): {updates}"
+                f"Prepared batch update data for /fetch (using execution): {updates}"
             )
             sheet.batch_update(updates, value_input_option="USER_ENTERED")
             logger.info(
-                f"Updated cells in row {target_row_number} for {asset} (Order ID: {order_id_to_fetch}) via /fetch (order history)."
+                f"Updated cells in row {target_row_number} for {asset} (Exec ID: {exec_id_to_fetch}) via /fetch."
             )
             bot.reply_to(
                 message,
-                f"Данные ордера {order_id_to_fetch} ({asset}) добавлены в строку {target_row_number}!",
+                f"Сделка по {asset} (Exec ID: {exec_id_to_fetch}) успешно добавлена в строку {target_row_number} из Bybit!",
             )
 
         except Exception as e:
@@ -493,35 +503,35 @@ if bot:  # Только если бот инициализирован
             )
 
     # --- Обработчик для кнопки "Добавить по ID" ---
+    # ТЕПЕРЬ ОН ЖДЕТ ID ТРАНЗАКЦИИ (execId)
     @bot.message_handler(func=lambda m: m.text == "Добавить по ID")
     def kb_addid(message):
-        # Просто просим ID и передаем его в обработчик handle_fetch
-        msg = bot.send_message(message.chat.id, "Введите OrderID с Bybit:")
-        # Важно: Регистрируем следующий шаг на функцию handle_fetch, а не process_addid
+        # Просим ID Транзакции
+        msg = bot.send_message(
+            message.chat.id, "Введите ID ТРАНЗАКЦИИ (Exec ID) с Bybit:"
+        )
+        # Регистрируем следующий шаг на функцию fetch_wrapper (которая вызовет handle_fetch)
         bot.register_next_step_handler(msg, fetch_wrapper_for_next_step)
 
+    # Обертка осталась та же, но теперь она передаст ExecID в handle_fetch
     def fetch_wrapper_for_next_step(message):
-        # Эта обертка нужна, чтобы текст сообщения стал командой /fetch ID
-        logger.info(f"Received Order ID '{message.text}' via next_step_handler")
-        # Формируем "фальшивое" сообщение, как будто пользователь ввел /fetch ID
+        logger.info(f"Received Exec ID '{message.text}' via next_step_handler")
         fake_command_message = type(
             "FakeCommandMessage",
             (object,),
             {
-                "text": f"/fetch {message.text.strip()}",
+                "text": f"/fetch {message.text.strip()}",  # Формируем команду /fetch с ID
                 "chat": message.chat,
-                "from_user": message.from_user,  # Копируем пользователя для логирования/идентификации
-                "message_id": message.message_id,  # Копируем ID исходного сообщения
+                "from_user": message.from_user,
+                "message_id": message.message_id,
             },
         )()
-        # Передаем фальшивое сообщение в основной обработчик /fetch
         handle_fetch(fake_command_message)
 
-    # ОБНОВЛЕННЫЙ /close
+    # /close - остается без изменений
     @bot.message_handler(commands=["close"])
     def handle_close(message):
         # ... (Код функции handle_close без изменений) ...
-        # ... (Ищет по E и пустому T, обновляет C, D, S, T) ...
         chat_id = message.chat.id
         logger.info(f"Received /close command from {chat_id}: {message.text}")
         if not sheet:
@@ -549,7 +559,7 @@ if bot:  # Только если бот инициализирован
             header_row = list_of_lists[0] if list_of_lists else []
             logger.debug(f"Header row: {header_row}")
             asset_col_name = "Торгуемая пара (актив)"
-            actual_exit_price_col_name = "Фактическая цена выхода ($)"  # Столбец T
+            actual_exit_price_col_name = "Фактическая цена выхода ($)"  # T
             exit_date_col_letter = "C"
             exit_time_col_letter = "D"
             exit_method_col_letter = "S"
@@ -622,7 +632,7 @@ if bot:  # Только если бот инициализирован
             logger.error(f"Error processing /close command: {e}", exc_info=True)
             bot.reply_to(message, "Ошибка при закрытии сделки.")
 
-else:  # Если bot is None
+else:
     logger.error(
         "CRITICAL: Bot object is None, Telegram command handlers cannot be registered!"
     )
