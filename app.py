@@ -266,6 +266,7 @@ if bot:  # Только если бот инициализирован
             "Закрыть сделку"
         )  # Убрал /close из текста кнопки
         btn_glossary = types.KeyboardButton("Глоссарий")
+        btn_report = types.KeyboardButton("Отчёт")
         btn_hide = types.KeyboardButton("Скрыть меню")
         markup.add(btn_add_manual, btn_add_by_id, btn_close, btn_glossary, btn_hide)
         bot.send_message(message.chat.id, "Выберите действие:", reply_markup=markup)
@@ -276,6 +277,7 @@ if bot:  # Только если бот инициализирован
             "`/add <Пара> <Тип> <Вход> <TP> <SL> <Объем> <OrderID>`\n"
             "`/fetch <ExecID>` - добавить по ID Транзакции\n"
             "`/close <Пара> <ЦенаВыхода>`\n"
+            "/report — получить отчёт\n"
             "`/menu` - показать это меню",
             parse_mode="Markdown",
         )
@@ -735,6 +737,30 @@ if bot:  # Только если бот инициализирован
         except Exception as e:
             logger.error(f"Error processing /close command: {e}", exc_info=True)
             bot.reply_to(message, "Ошибка при закрытии сделки.")
+
+    @bot.message_handler(func=lambda m: m.text == "Отчёт")
+    @bot.message_handler(commands=["report"])
+    def handle_report(message):
+        """Отправляем запрос к Apps Script и подтверждаем пользователю."""
+        chat_id = message.chat.id
+        if not WEBAPP_URL:
+            return bot.reply_to(message, "Ошибка: WEBAPP_URL не задан.")
+        # Формируем запрос
+        url = f"{WEBAPP_URL}?func=weeklyReport&chat_id={chat_id}"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                bot.reply_to(
+                    message, "Запрос отчёта отправлен! Отчёт придёт в этот чат."
+                )
+            else:
+                bot.reply_to(
+                    message, f"Ошибка при запросе отчёта: HTTP {resp.status_code}"
+                )
+            logger.info(f"/report → {url} → {resp.status_code} / {resp.text}")
+        except Exception as e:
+            logger.error(f"Ошибка при запросе /report: {e}", exc_info=True)
+            bot.reply_to(message, "Не удалось связаться со скриптом. Попробуйте позже.")
 
     # --- НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ГЛОССАРИЯ ---
     @bot.message_handler(func=lambda message: message.text == "Глоссарий")
