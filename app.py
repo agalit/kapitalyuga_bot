@@ -4,6 +4,7 @@ import os
 import logging
 import datetime
 import time
+import requests
 import telebot
 import gspread
 from flask import Flask, request
@@ -743,11 +744,18 @@ if bot:  # Только если бот инициализирован
     def handle_report(message):
         """Отправляем запрос к Apps Script и подтверждаем пользователю."""
         chat_id = message.chat.id
+        # WEBAPP_URL должен быть определен как переменная окружения
+        WEBAPP_URL = os.getenv("WEBAPP_URL")
         if not WEBAPP_URL:
-            return bot.reply_to(message, "Ошибка: WEBAPP_URL не задан.")
+            logger.error("Переменная окружения WEBAPP_URL не установлена!")
+            return bot.reply_to(
+                message, "Ошибка: URL для генерации отчета не настроен."
+            )
+
         # Формируем запрос
         url = f"{WEBAPP_URL}?func=weeklyReport&chat_id={chat_id}"
         try:
+            # Используем requests для отправки GET-запроса
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 bot.reply_to(
@@ -758,9 +766,20 @@ if bot:  # Только если бот инициализирован
                     message, f"Ошибка при запросе отчёта: HTTP {resp.status_code}"
                 )
             logger.info(f"/report → {url} → {resp.status_code} / {resp.text}")
+        except (
+            requests.exceptions.RequestException
+        ) as e:  # Более специфичный обработчик ошибок requests
+            logger.error(f"Ошибка сети при запросе /report: {e}", exc_info=True)
+            bot.reply_to(
+                message,
+                "Не удалось связаться со скриптом отчета (ошибка сети). Попробуйте позже.",
+            )
         except Exception as e:
-            logger.error(f"Ошибка при запросе /report: {e}", exc_info=True)
-            bot.reply_to(message, "Не удалось связаться со скриптом. Попробуйте позже.")
+            logger.error(f"Общая ошибка при запросе /report: {e}", exc_info=True)
+            bot.reply_to(
+                message,
+                "Произошла непредвиденная ошибка при запросе отчета. Попробуйте позже.",
+            )
 
     # --- НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ГЛОССАРИЯ ---
     @bot.message_handler(func=lambda message: message.text == "Глоссарий")
