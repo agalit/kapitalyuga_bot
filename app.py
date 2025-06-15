@@ -3,11 +3,12 @@
 import os
 import logging
 import datetime
-import time
 import requests
 import telebot
 import gspread
 from flask import Flask, request
+import pandas as pd  # Для манипуляций с данными
+from ta.trend import SMAIndicator, ADXIndicator  # Для расчетов SMA и ADX
 
 # Используем современную библиотеку google-auth
 from google.oauth2.service_account import Credentials
@@ -34,12 +35,19 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     logger.error("FATAL: TELEGRAM_BOT_TOKEN not set!")
 
+WEBAPP_URL = os.getenv("WEBAPP_URL")
+if not WEBAPP_URL:
+    logger.warning(
+        "WARNING: WEBAPP_URL environment variable is not set. Report command might not work."
+    )
+
 # --- Google Sheets ---
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Таблица сделок")
 GLOSSARY_SHEET_NAME = os.getenv(
     "GLOSSARY_SHEET_NAME", "Глоссарий"
 )  # Имя листа глоссария
+SCREENER_SHEET_NAME = os.getenv("SCREENER_SHEET_NAME", "Скринер")
 CREDENTIALS_PATH = "/etc/secrets/credentials.json"  # Путь к секретному файлу Render
 
 # --- Структура Таблицы Сделок (A-AD, 30 столбцов) ---
@@ -92,6 +100,7 @@ google_creds = None
 google_client = None
 app = None
 user_states = {}  # Для хранения состояния разговора (например, для глоссария)
+screener_sheet = None  # Лист для скринера
 
 # === Инициализация Flask ===
 # Инициализируем Flask ДО попытки использования 'app'
@@ -113,7 +122,7 @@ else:
 # === Функции Инициализации Сервисов ===
 def init_google_sheets():
     """Инициализирует подключение к Google Sheets и обоим листам."""
-    global sheet, glossary_sheet, google_creds, google_client
+    global sheet, glossary_sheet, screener_sheet, google_creds, google_client
     logger.info("Attempting to connect to Google Sheets...")
     if not SPREADSHEET_ID:
         logger.error("FATAL: SPREADSHEET_ID not set!")
@@ -153,18 +162,31 @@ def init_google_sheets():
                 f"FATAL: Glossary Worksheet '{GLOSSARY_SHEET_NAME}' not found!"
             )
             glossary_sheet = None
+        try:
+            screener_sheet = spreadsheet.worksheet(SCREENER_SHEET_NAME)
+            logger.info(f"Подключено к листу скринера: '{screener_sheet.title}'")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.warning(
+                f"Лист скринера '{SCREENER_SHEET_NAME}' не найден. Он будет создан при первом использовании."
+            )
+            screener_sheet = (
+                None  # Устанавливаем в None, будет создан позже, если потребуется
+            )
         return (
-            sheet is not None or glossary_sheet is not None
-        )  # Успех, если хоть один лист найден
-    except gspread.exceptions.APIError as e:  # Обработка ошибок API Google
+            sheet is not None
+            or glossary_sheet is not None
+            or screener_sheet is not None
+        )  # Успех, если найден хотя бы один лист
+    except gspread.exceptions.APIError as e:
         if hasattr(e, "response") and e.response.status_code == 401:
-            logger.warning("Google API Error 401. Refresh needed?")
-            # Просто логируем, рефреш часто не помогает с сервисными аккаунтами
+            logger.warning("Ошибка Google API 401. Требуется обновление?")
         else:
-            logger.error(f"FATAL: Google API Error: {e}", exc_info=True)
+            logger.error(f"ФАТАЛЬНАЯ ОШИБКА: Ошибка Google API: {e}", exc_info=True)
         return False
     except Exception as e:
-        logger.error(f"FATAL: Error connecting Google Sheets: {e}", exc_info=True)
+        logger.error(
+            f"ФАТАЛЬНАЯ ОШИБКА: Ошибка подключения к Google Sheets: {e}", exc_info=True
+        )
         return False
 
 
@@ -218,6 +240,140 @@ def init_bybit():
         return False
 
 
+# === Функции для Скринера ===
+def fetch_and_write_screener(bybit_session, spreadsheet):
+    """
+    Скачивает 4h-данные по топ-20 USDT-парам, считает SMA30, SMA90, ADX и записывает в лист Скринер.
+    """
+    global screener_sheet  # Объявляем global для обновления глобальной переменной, если лист создан
+    logger.info("Начинаю получение и запись данных скринера...")
+    try:
+        if (
+            screener_sheet is None
+        ):  # Если не подключен при инициализации, пытаемся получить или создать
+            try:
+                screener_sheet = spreadsheet.worksheet(SCREENER_SHEET_NAME)
+                logger.info(
+                    f"Повторно подключено к листу скринера: '{screener_sheet.title}'"
+                )
+            except gspread.exceptions.WorksheetNotFound:
+                logger.info(
+                    f"Лист скринера '{SCREENER_SHEET_NAME}' не найден, создаю его..."
+                )
+                # Если листа нет — создаём. Убедитесь, что `google_client` (который `client` в connect_google_sheets) доступен.
+                # Или передавайте `google_client` как аргумент. Здесь я полагаю, что `spreadsheet` уже получен через `google_client`.
+                screener_sheet = spreadsheet.add_worksheet(
+                    title=SCREENER_SHEET_NAME, rows="100", cols="10"
+                )
+                logger.info(f"Создан новый лист скринера: '{SCREENER_SHEET_NAME}'")
+        else:
+            logger.info(
+                f"Использую существующий лист скринера: '{screener_sheet.title}'"
+            )
+
+        if not screener_sheet:
+            logger.error("Не удалось получить или создать лист скринера.")
+            return "Ошибка: Лист 'Скринер' не доступен."
+
+        # Пример списка пар — можно заменить чтением из другого листа или из файла конфигурации
+        top_pairs = [
+            "BTCUSDT",
+            "ETHUSDT",
+            "BNBUSDT",
+            "ADAUSDT",
+            "SOLUSDT",
+            "XRPUSDT",
+            "DOTUSDT",
+            "MATICUSDT",
+            "DOGEUSDT",
+            "LTCUSDT",
+            "AVAXUSDT",
+            "LINKUSDT",
+            "UNIUSDT",
+            "ATOMUSDT",
+            "ALGOUSDT",
+            "MANAUSDT",
+            "FTMUSDT",
+            "ICPUSDT",
+            "SANDUSDT",
+            "APTUSDT",
+        ]
+
+        market_rows = []
+        for symbol in top_pairs:
+            logger.debug(f"Получаю данные свечей для {symbol}...")
+            klines_response = bybit_session.get_kline(
+                symbol=symbol,
+                interval="240",
+                limit=100,  # "240" для 4-часового интервала
+            )
+            if not (klines_response and klines_response.get("retCode") == 0):
+                logger.warning(
+                    f"Не удалось получить свечи для {symbol}: {klines_response.get('retMsg', 'Неизвестная ошибка')}"
+                )
+                continue
+
+            klines = klines_response.get("result", {}).get("list", [])
+            if not klines:
+                logger.warning(f"Нет данных свечей для {symbol}. Пропускаю.")
+                continue
+
+            # Bybit klines возвращает порядок: [startTime, open, high, low, close, volume, turnOver]
+            # Разворачиваем список, чтобы самые старые данные были первыми для расчетов TA
+            klines_reversed = klines[::-1]
+
+            closes = pd.Series([float(c[4]) for c in klines_reversed])
+            highs = pd.Series([float(c[2]) for c in klines_reversed])
+            lows = pd.Series([float(c[3]) for c in klines_reversed])
+            vols = [float(c[5]) for c in klines_reversed]
+
+            # Убедимся, что данных достаточно для расчетов SMA
+            if len(closes) < 90:  # Нужно как минимум 90 точек данных для SMA90
+                logger.warning(
+                    f"Недостаточно данных для {symbol} ({len(closes)} свечей). Пропускаю расчет SMA/ADX для этой пары."
+                )
+                continue
+
+            sma30 = SMAIndicator(closes, window=30).sma_indicator().iloc[-1]
+            sma90 = SMAIndicator(closes, window=90).sma_indicator().iloc[-1]
+            adx = (
+                ADXIndicator(highs, lows, closes, window=14).adx().iloc[-1]
+            )  # ADX принимает high, low, close
+            last_vol = vols[-1]
+            # Используем openTime последней свечи для временной метки
+            ts_ms = int(klines[0][0])  # Bybit возвращает самую последнюю свечу первой
+            ts = datetime.datetime.fromtimestamp(ts_ms / 1000)
+
+            market_rows.append(
+                [
+                    symbol,
+                    round(sma30, 6),
+                    round(sma90, 6),
+                    round(adx, 2),
+                    round(last_vol, 2),
+                    ts.strftime("%d.%m.%Y %H:%M"),
+                ]
+            )
+
+        # Записываем в таблицу
+        # .clear() удалит все, включая форматирование. Можно использовать update с пустыми данными,
+        # если нужно сохранить форматирование, но для скринера обычно просто очищают.
+        screener_sheet.clear()
+        header = [["Pair", "SMA30", "SMA90", "ADX", "Vol", "Time"]]
+        screener_sheet.append_rows(
+            header + market_rows, value_input_option="USER_ENTERED"
+        )
+        logger.info(f"Успешно записано {len(market_rows)} строк в лист скринера.")
+        return f"✅ Данные скринера успешно обновлены\\. Добавлено *{len(market_rows)}* пар\\."
+
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Ошибка Google Sheets API в скринере: {e}", exc_info=True)
+        return f"❌ Ошибка Google Sheets API при обновлении скринера: {e}"
+    except Exception as e:
+        logger.error(f"Произошла ошибка в fetch_and_write_screener: {e}", exc_info=True)
+        return f"❌ Произошла непредвиденная ошибка при обновлении скринера: {e}"
+
+
 # === Инициализация сервисов при старте ===
 if not init_google_sheets():
     logger.error("CRITICAL: Failed to initialize Google Sheets.")
@@ -268,8 +424,17 @@ if bot:  # Только если бот инициализирован
         )  # Убрал /close из текста кнопки
         btn_glossary = types.KeyboardButton("Глоссарий")
         btn_report = types.KeyboardButton("Отчёт")
+        btn_screener = types.KeyboardButton("Обновить Скринер")
         btn_hide = types.KeyboardButton("Скрыть меню")
-        markup.add(btn_add_manual, btn_add_by_id, btn_close, btn_glossary, btn_hide)
+        markup.add(
+            btn_add_manual,
+            btn_add_by_id,
+            btn_close,
+            btn_glossary,
+            btn_report,
+            btn_screener,
+            btn_hide,
+        )
         bot.send_message(message.chat.id, "Выберите действие:", reply_markup=markup)
         # Справка по командам
         bot.send_message(
@@ -279,6 +444,7 @@ if bot:  # Только если бот инициализирован
             "`/fetch <ExecID>` - добавить по ID Транзакции\n"
             "`/close <Пара> <ЦенаВыхода>`\n"
             "/report — получить отчёт\n"
+            "`/screener` — обновить данные скринера\n"
             "`/menu` - показать это меню",
             parse_mode="Markdown",
         )
@@ -315,7 +481,7 @@ if bot:  # Только если бот инициализирован
         try:
             parts = message.text.split()
             if len(parts) != 8:
-                logger.warning(f"Invalid format for /add...")
+                logger.warning("Invalid format for /add...")
                 bot.reply_to(
                     message,
                     "Неверный формат! Нужно 8 частей.\nПример:\n`/add SOL/USDT Лонг 139.19 141.8 136.9 1.5 <Bybit_Order_ID>`",
@@ -646,7 +812,7 @@ if bot:  # Только если бот инициализирован
         try:
             parts = message.text.split()
             if len(parts) != 3:
-                logger.warning(f"Invalid format for /close...")
+                logger.warning("Invalid format for /close...")
                 bot.reply_to(
                     message,
                     "Неверный формат. Пример:\n`/close SOL/USDT 140.55`",
@@ -679,8 +845,8 @@ if bot:  # Только если бот инициализирован
                 bot.reply_to(message, f"Критическая ошибка: Не найден столбец '{e}'.")
                 return
             except IndexError:
-                logger.error(f"Header row not found or empty in /close.")
-                bot.reply_to(message, f"Критическая ошибка: Не найден заголовок.")
+                logger.error("Header row not found or empty in /close.")
+                bot.reply_to(message, "Критическая ошибка: Не найден заголовок.")
                 return
             found = False
             for i in range(len(list_of_lists) - 1, 0, -1):
@@ -743,13 +909,41 @@ if bot:  # Только если бот инициализирован
     @bot.message_handler(commands=["report"])
     def handle_report(message):
         """Отправляем запрос к Apps Script и подтверждаем пользователю."""
-        chat_id = message.chat.id
         # WEBAPP_URL должен быть определен как переменная окружения
         WEBAPP_URL = os.getenv("WEBAPP_URL")
         if not WEBAPP_URL:
             logger.error("Переменная окружения WEBAPP_URL не установлена!")
             return bot.reply_to(
                 message, "Ошибка: URL для генерации отчета не настроен."
+            )
+
+    @bot.message_handler(func=lambda m: m.text == "Обновить Скринер")
+    @bot.message_handler(commands=["screener"])
+    def handle_screener_update(message):
+        chat_id = message.chat.id
+        logger.info(f"Получена команда /screener от {chat_id}")
+
+        if not bybit_session:
+            return bot.reply_to(message, "Ошибка: Нет подключения к Bybit API.")
+        if (
+            not google_client
+        ):  # Проверяем, инициализирован ли google_client (используется для открытия таблицы)
+            return bot.reply_to(message, "Ошибка: Нет подключения к Google Sheets.")
+
+        bot.send_message(
+            chat_id, "Начинаю обновление данных скринера. Это может занять до минуты..."
+        )
+        try:
+            # Передаем google_client в fetch_and_write_screener для получения таблицы
+            spreadsheet = google_client.open_by_key(SPREADSHEET_ID)
+            response_message = fetch_and_write_screener(bybit_session, spreadsheet)
+            bot.send_message(chat_id, response_message, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(
+                f"Ошибка при вызове fetch_and_write_screener: {e}", exc_info=True
+            )
+            bot.send_message(
+                chat_id, "Произошла непредвиденная ошибка при обновлении скринера."
             )
 
         # Формируем запрос
